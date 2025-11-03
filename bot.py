@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+import sys
 from typing import Optional
 from telegram import Update, Video
 from telegram.constants import ChatAction
@@ -63,9 +64,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Отправляем как video note (кружок)
-        async with await context.bot.session.get("file://" + output_path):
-            pass  # не используется: будем отправлять локальный файл напрямую
-
         with open(output_path, 'rb') as f:
             await message.reply_video_note(video_note=f)
 
@@ -77,9 +75,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка при обработке видео")
         await message.reply_text(f"Ошибка: {e}")
 
-async def main():
+def main():
     Config.validate()
-
+    
+    # Исправление для Windows: устанавливаем правильную политику event loop
+    if sys.platform.startswith('win'):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
     application = Application.builder().token(Config.BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -91,10 +93,10 @@ async def main():
     ))
 
     logger.info("Бот запущен. Нажмите Ctrl+C для остановки.")
-    await application.run_polling(close_loop=False)
+    application.run_polling()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Остановка бота...")
