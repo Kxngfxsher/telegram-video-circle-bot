@@ -52,8 +52,33 @@ class VideoProcessor:
         end_time = min(duration, target_duration)
         return start_time, end_time
     
-    def create_video_circle(self, input_path: str, output_path: str, target_duration: int) -> bool:
-        """Создаёт видео кружок с оптимизированными параметрами для Telegram"""
+    def create_scale_filter(self, scale_percent: int) -> str:
+        """Создаёт фильтр масштабирования для кружка"""
+        size = self.circle_size
+        zoom_factor = scale_percent / 100.0
+        
+        if scale_percent == 100:
+            # Обычное масштабирование до квадрата
+            return (
+                f"scale='if(gt(iw,ih),-1,{size})':'if(gt(ih,iw),-1,{size})':"
+                f"force_original_aspect_ratio=increase,crop={size}:{size}"
+            )
+        
+        # Масштабирование с зумом:
+        # 1. Сначала масштабируем по максимальной стороне с запасом для зума
+        # 2. Потом применяем зум и кадрируем
+        intermediate_size = int(size * max(1.2, zoom_factor))  # Даём запас для качества
+        
+        return (
+            f"scale='if(gt(iw,ih),-1,{intermediate_size})':'if(gt(ih,iw),-1,{intermediate_size})':"
+            f"force_original_aspect_ratio=increase,"
+            f"crop={intermediate_size}:{intermediate_size},"
+            f"scale={int(size * zoom_factor)}:{int(size * zoom_factor)},"
+            f"crop={size}:{size}"
+        )
+    
+    def create_video_circle(self, input_path: str, output_path: str, target_duration: int, scale_percent: int) -> bool:
+        """Создаёт видео кружок с настраиваемым масштабом"""
         try:
             info = self.get_video_info(input_path)
             if not info:
@@ -61,7 +86,8 @@ class VideoProcessor:
             
             logger.info(
                 f"Обрабатываем видео: {info['width']}x{info['height']}, длительность: {info['duration']:.2f}с, "
-                f"видео кодек: {info['video_codec']}, аудио: {info['audio_codec'] or 'нет'}"
+                f"видео кодек: {info['video_codec']}, аудио: {info['audio_codec'] or 'нет'}, "
+                f"масштаб: {scale_percent}%"
             )
             
             start_time, end_time = self.calculate_start_segment(info['duration'], target_duration)
@@ -70,18 +96,15 @@ class VideoProcessor:
                 f"Извлекаем сегмент с начала: {start_time:.2f}с - {end_time:.2f}с (продолжительность: {segment_duration:.2f}с)"
             )
             
-            size = self.circle_size
-            vf = (
-                f"scale='if(gt(iw,ih),-1,{size})':'if(gt(ih,iw),-1,{size})':"
-                f"force_original_aspect_ratio=increase,crop={size}:{size}"
-            )
+            # Создаём фильтр масштабирования с учётом зума
+            video_filter = self.create_scale_filter(scale_percent)
             
             in_v = ffmpeg.input(input_path, ss=start_time, t=segment_duration)
             
             # Оптимизированные параметры для Telegram:
             video_params = {
                 'vcodec': 'libx264',
-                'vf': vf,
+                'vf': video_filter,
                 'pix_fmt': 'yuv420p',
                 'preset': 'medium',
                 'crf': '23',
@@ -132,8 +155,8 @@ class VideoProcessor:
             logger.error(f"Ошибка при создании видео кружка: {e}")
             return False
     
-    def process_video(self, input_path: str, duration_override: Optional[int] = None) -> Optional[str]:
-        """Основной метод для обработки видео с персональной длительностью"""
+    def process_video(self, input_path: str, duration_override: Optional[int] = None, scale_override: Optional[int] = None) -> Optional[str]:
+        """Основной метод для обработки видео с персональными настройками"""
         try:
             os.makedirs(self.temp_dir, exist_ok=True)
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False, dir=self.temp_dir) as temp_file:
@@ -142,10 +165,11 @@ class VideoProcessor:
                 logger.error(f"Входной файл не найден: {input_path}")
                 return None
             
-            # Используем персональную длительность или по умолчанию
+            # Используем персональные настройки или по умолчанию
             target_duration = duration_override if duration_override is not None else Config.CIRCLE_DURATION
+            target_scale = scale_override if scale_override is not None else 100
             
-            if self.create_video_circle(input_path, output_path, target_duration):
+            if self.create_video_circle(input_path, output_path, target_duration, target_scale):
                 return output_path
             if os.path.exists(output_path):
                 os.unlink(output_path)
