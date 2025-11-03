@@ -19,13 +19,14 @@ class VideoProcessor:
         """Получает информацию о видео файле"""
         try:
             probe = ffmpeg.probe(video_path)
+            fmt = probe.get('format', {})
+            duration = float(fmt.get('duration', 0) or 0)
             video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
             
             if video_stream is None:
                 logger.error(f"Не найден видео поток в файле: {video_path}")
                 return None
                 
-            duration = float(video_stream.get('duration', 0))
             width = int(video_stream.get('width', 0))
             height = int(video_stream.get('height', 0))
             
@@ -41,27 +42,20 @@ class VideoProcessor:
             logger.error(f"Ошибка при получении информации о видео: {e}")
             return None
     
-    def calculate_middle_segment(self, duration: float) -> Tuple[float, float]:
-        """Вычисляет начало и конец среднего сегмента видео"""
+    def calculate_start_segment(self, duration: float) -> Tuple[float, float]:
+        """Вычисляет начало и конец сегмента с начала видео"""
         # Если видео короче желаемой продолжительности кружка
         if duration <= self.circle_duration:
             return 0, duration
         
-        # Находим середину видео
-        middle = duration / 2
+        # Берём с начала видео нужную длительность
+        start_time = 0
+        end_time = min(duration, self.circle_duration)
         
-        # Вычисляем начало сегмента
-        start_time = max(0, middle - self.circle_duration / 2)
-        end_time = min(duration, start_time + self.circle_duration)
-        
-        # Корректируем, если вышли за границы
-        if end_time == duration:
-            start_time = max(0, duration - self.circle_duration)
-            
         return start_time, end_time
     
     def create_video_circle(self, input_path: str, output_path: str) -> bool:
-        """Создаёт видео кружок из входного видео"""
+        """Создаёт видео кружок из входного видео (надёжный пайплайн)"""
         try:
             # Получаем информацию о видео
             video_info = self.get_video_info(input_path)
@@ -71,51 +65,60 @@ class VideoProcessor:
             logger.info(f"Обрабатываем видео: {video_info['width']}x{video_info['height']}, "
                        f"продолжительность: {video_info['duration']:.2f}с")
             
-            # Вычисляем средний сегмент
-            start_time, end_time = self.calculate_middle_segment(video_info['duration'])
-            segment_duration = end_time - start_time
+            # Вычисляем сегмент с начала видео
+            start_time, end_time = self.calculate_start_segment(video_info['duration'])
+            segment_duration = max(0.5, end_time - start_time)  # не меньше 0.5 сек
             
-            logger.info(f"Извлекаем сегмент: {start_time:.2f}с - {end_time:.2f}с "
+            logger.info(f"Извлекаем сегмент с начала: {start_time:.2f}с - {end_time:.2f}с "
                        f"(продолжительность: {segment_duration:.2f}с)")
             
-            # Создаём ffmpeg команду
-            input_stream = ffmpeg.input(input_path, ss=start_time, t=segment_duration)
+            size = self.circle_size  # 240/480/720
             
-            # Применяем фильтры:
-            # 1. Масштабируем до нужного размера с сохранением пропорций
-            # 2. Обрезаем до квадрата
-            output_stream = (
-                input_stream
-                .video
-                .filter('scale', f'{self.circle_size}:{self.circle_size}:force_original_aspect_ratio=increase')
-                .filter('crop', self.circle_size, self.circle_size)
+            # Пайплайн для конвертации:
+            # 1. Обрезаем с начала видео нужную длительность
+            # 2. Масштабируем с сохранением пропорций
+            # 3. Обрезаем до квадрата
+            # 4. Добавляем немое аудио, если нужно
+            
+            video_filter = (
+                f"scale='if(gt(iw,ih),-1,{size})':'if(gt(ih,iw),-1,{size})':"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={size}:{size}"
             )
             
-            # Сохраняем в файл
-            output_stream = ffmpeg.output(
-                output_stream,
+            # Создаём команду конвертации
+            input_video = ffmpeg.input(input_path, ss=start_time, t=segment_duration)
+            silent_audio = ffmpeg.input('anullsrc=r=48000:cl=stereo', f='lavfi')
+            
+            output = ffmpeg.output(
+                input_video.video,
+                silent_audio.audio,
                 output_path,
                 vcodec='libx264',
                 acodec='aac',
-                **{
-                    'movflags': '+faststart',  # Оптимизация для стриминга
-                    'pix_fmt': 'yuv420p',     # Совместимость с большинством плееров
-                    'preset': 'medium',       # Баланс скорости и качества
-                    'crf': '23'              # Качество (18-28, меньше = лучше)
-                }
-            )
+                vf=video_filter,
+                pix_fmt='yuv420p',
+                preset='medium',
+                crf=23,
+                movflags='+faststart',
+                shortest=None  # обрезаем по короткому потоку (видео)
+            ).global_args('-loglevel', 'error').overwrite_output()
             
             # Выполняем конвертацию
-            ffmpeg.run(output_stream, overwrite_output=True, quiet=True)
+            ffmpeg.run(output, capture_stderr=True)
             
             # Проверяем, что файл создался успешно
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 logger.info(f"Видео кружок успешно создан: {output_path}")
                 return True
             else:
-                logger.error(f"Не удалось создать видео кружок: {output_path}")
+                logger.error(f"FFmpeg не создал файл (пусто): {output_path}")
                 return False
                 
+        except ffmpeg.Error as e:
+            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+            logger.error(f"FFmpeg stderr:\n{stderr}")
+            return False
         except Exception as e:
             logger.error(f"Ошибка при создании видео кружка: {e}")
             return False
@@ -123,6 +126,9 @@ class VideoProcessor:
     def process_video(self, input_path: str) -> Optional[str]:
         """Основной метод для обработки видео"""
         try:
+            # Убеждаемся, что temp каталог существует
+            os.makedirs(self.temp_dir, exist_ok=True)
+            
             # Создаём временный файл для выходного видео
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False, dir=self.temp_dir) as temp_file:
                 output_path = temp_file.name
