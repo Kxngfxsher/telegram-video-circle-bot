@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 processor = VideoProcessor()
 
 # Хранение персональных настроек пользователей (в памяти процесса)
-user_settings = {}
+user_settings = {
+    # user_id: {'duration': int, 'scale': int}
+}
 
 HELP_TEXT = (
     "Привет! Я конвертирую пересланные видео в видео-кружочки (video notes).\n\n"
@@ -29,9 +31,24 @@ HELP_TEXT = (
     "/start — краткая справка\n"
     "/help — помощь\n"
     "/duration <сек> — установить длительность кружка (1-60 сек)\n"
-    "/duration — узнать текущую длительность\n\n"
-    "Пример: /duration 15 (установить 15 секунд)"
+    "/duration — узнать текущую длительность\n"
+    "/scale <проценты> — масштаб изображения (50-300%)\n"
+    "/scale — узнать текущий масштаб\n\n"
+    "Примеры:\n"
+    "/duration 15 (установить 15 секунд)\n"
+    "/scale 150 (увеличить изображение на 50%)\n"
+    "/scale 75 (уменьшить, больше сцены видно)"
 )
+
+def get_user_setting(user_id: int, key: str, default):
+    """Получить персональную настройку пользователя"""
+    return user_settings.get(user_id, {}).get(key, default)
+
+def set_user_setting(user_id: int, key: str, value):
+    """Установить персональную настройку пользователя"""
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id][key] = value
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT)
@@ -45,7 +62,7 @@ async def duration_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         # Показываем текущую длительность
-        current_duration = user_settings.get(user_id, Config.CIRCLE_DURATION)
+        current_duration = get_user_setting(user_id, 'duration', Config.CIRCLE_DURATION)
         await update.message.reply_text(
             f"Текущая длительность кружка: {current_duration} сек.\n"
             f"Для изменения используйте: /duration <1-60>"
@@ -62,8 +79,7 @@ async def duration_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Сохраняем настройку пользователя
-        user_settings[user_id] = new_duration
+        set_user_setting(user_id, 'duration', new_duration)
         await update.message.reply_text(
             f"✅ Длительность кружка установлена: {new_duration} сек.\n"
             "Теперь отправьте видео для обработки."
@@ -73,6 +89,52 @@ async def duration_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Неверный формат. Используйте: /duration <число>\n"
             "Пример: /duration 20"
+        )
+
+async def scale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для установки/просмотра масштаба кружка"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        # Показываем текущий масштаб
+        current_scale = get_user_setting(user_id, 'scale', 100)
+        await update.message.reply_text(
+            f"Текущий масштаб изображения: {current_scale}%\n"
+            f"Для изменения используйте: /scale <50-300>\n\n"
+            f"100% — оригинал\n"
+            f"150% — увеличить (крупнее)\n"
+            f"75% — уменьшить (больше сцены)"
+        )
+        return
+    
+    try:
+        new_scale = int(context.args[0])
+        
+        if new_scale < 50 or new_scale > 300:
+            await update.message.reply_text(
+                "Масштаб должен быть от 50 до 300 процентов.\n"
+                "Примеры:\n"
+                "/scale 100 (оригинал)\n"
+                "/scale 150 (увеличить на 50%)\n"
+                "/scale 75 (уменьшить на 25%)"
+            )
+            return
+        
+        set_user_setting(user_id, 'scale', new_scale)
+        scale_description = (
+            "оригинал" if new_scale == 100 else
+            f"увеличено на {new_scale - 100}%" if new_scale > 100 else
+            f"уменьшено на {100 - new_scale}%"
+        )
+        await update.message.reply_text(
+            f"✅ Масштаб изображения установлен: {new_scale}% ({scale_description})\n"
+            "Теперь отправьте видео для обработки."
+        )
+        
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "Неверный формат. Используйте: /scale <число>\n"
+            "Пример: /scale 150"
         )
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,11 +162,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         input_path = os.path.join(Config.TEMP_DIR, f"input_{tg_video.file_unique_id}.mp4")
         await file.download_to_drive(custom_path=input_path)
 
-        # Получаем персональную длительность пользователя (или по умолчанию из Config)
-        user_duration = user_settings.get(user_id, Config.CIRCLE_DURATION)
+        # Получаем персональные настройки пользователя
+        user_duration = get_user_setting(user_id, 'duration', Config.CIRCLE_DURATION)
+        user_scale = get_user_setting(user_id, 'scale', 100)
         
-        # Обрабатываем видео → делаем кружок с персональной длительностью
-        output_path = processor.process_video(input_path, duration_override=user_duration)
+        # Обрабатываем видео → делаем кружок с персональными настройками
+        output_path = processor.process_video(
+            input_path, 
+            duration_override=user_duration,
+            scale_override=user_scale
+        )
         if not output_path:
             await message.reply_text("Не удалось обработать видео. Попробуйте другое.")
             return
@@ -133,6 +200,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("duration", duration_cmd))
+    application.add_handler(CommandHandler("scale", scale_cmd))
 
     # Обрабатываем видео и файлы, содержащие видео
     application.add_handler(MessageHandler(
