@@ -12,7 +12,6 @@ class VideoProcessor:
     
     def __init__(self):
         self.temp_dir = Config.TEMP_DIR
-        self.circle_duration = Config.CIRCLE_DURATION
         self.circle_size = Config.CIRCLE_SIZE[Config.CIRCLE_QUALITY]
         
     def get_video_info(self, video_path: str) -> Optional[dict]:
@@ -45,16 +44,16 @@ class VideoProcessor:
             logger.error(f"Ошибка при получении информации о видео: {e}")
             return None
     
-    def calculate_start_segment(self, duration: float) -> Tuple[float, float]:
+    def calculate_start_segment(self, duration: float, target_duration: int) -> Tuple[float, float]:
         """Вычисляет начало и конец сегмента с начала видео"""
-        if duration <= self.circle_duration:
+        if duration <= target_duration:
             return 0, duration
         start_time = 0
-        end_time = min(duration, self.circle_duration)
+        end_time = min(duration, target_duration)
         return start_time, end_time
     
-    def create_video_circle(self, input_path: str, output_path: str) -> bool:
-        """Создаёт видео кружок из входного видео (с сохранением оригинального звука, если есть)"""
+    def create_video_circle(self, input_path: str, output_path: str, target_duration: int) -> bool:
+        """Создаёт видео кружок с оптимизированными параметрами для Telegram"""
         try:
             info = self.get_video_info(input_path)
             if not info:
@@ -65,7 +64,7 @@ class VideoProcessor:
                 f"видео кодек: {info['video_codec']}, аудио: {info['audio_codec'] or 'нет'}"
             )
             
-            start_time, end_time = self.calculate_start_segment(info['duration'])
+            start_time, end_time = self.calculate_start_segment(info['duration'], target_duration)
             segment_duration = max(0.5, end_time - start_time)
             logger.info(
                 f"Извлекаем сегмент с начала: {start_time:.2f}с - {end_time:.2f}с (продолжительность: {segment_duration:.2f}с)"
@@ -79,40 +78,41 @@ class VideoProcessor:
             
             in_v = ffmpeg.input(input_path, ss=start_time, t=segment_duration)
             
+            # Оптимизированные параметры для Telegram:
+            video_params = {
+                'vcodec': 'libx264',
+                'vf': vf,
+                'pix_fmt': 'yuv420p',
+                'preset': 'medium',
+                'crf': '23',
+                'maxrate': '2500k',     # Максимальный битрейт 2.5 Mbps
+                'bufsize': '5000k',     # Буфер 5 MB
+                'movflags': '+faststart'
+            }
+            
+            audio_params = {
+                'acodec': 'aac',
+                'audio_bitrate': '128k'  # Ограничиваем битрейт аудио
+            }
+            
             if info['has_audio']:
-                # Сохраняем оригинальный звук (перекодируем в AAC для совместимости)
-                output = (
-                    ffmpeg
-                    .output(
-                        in_v.video, in_v.audio,
-                        output_path,
-                        vcodec='libx264',
-                        acodec='aac',
-                        vf=vf,
-                        pix_fmt='yuv420p',
-                        preset='medium',
-                        crf=23,
-                        movflags='+faststart',
-                        shortest=None
-                    )
+                # Сохраняем оригинальный звук
+                output = ffmpeg.output(
+                    in_v.video, in_v.audio,
+                    output_path,
+                    **video_params,
+                    **audio_params,
+                    shortest=None
                 )
             else:
-                # Если аудио нет — добавим немой трек, чтобы телега не капризничала
+                # Добавляем немой трек
                 silent_audio = ffmpeg.input('anullsrc=r=48000:cl=stereo', f='lavfi')
-                output = (
-                    ffmpeg
-                    .output(
-                        in_v.video, silent_audio.audio,
-                        output_path,
-                        vcodec='libx264',
-                        acodec='aac',
-                        vf=vf,
-                        pix_fmt='yuv420p',
-                        preset='medium',
-                        crf=23,
-                        movflags='+faststart',
-                        shortest=None
-                    )
+                output = ffmpeg.output(
+                    in_v.video, silent_audio.audio,
+                    output_path,
+                    **video_params,
+                    **audio_params,
+                    shortest=None
                 )
             
             output = output.global_args('-loglevel', 'error').overwrite_output()
@@ -132,8 +132,8 @@ class VideoProcessor:
             logger.error(f"Ошибка при создании видео кружка: {e}")
             return False
     
-    def process_video(self, input_path: str) -> Optional[str]:
-        """Основной метод для обработки видео"""
+    def process_video(self, input_path: str, duration_override: Optional[int] = None) -> Optional[str]:
+        """Основной метод для обработки видео с персональной длительностью"""
         try:
             os.makedirs(self.temp_dir, exist_ok=True)
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False, dir=self.temp_dir) as temp_file:
@@ -141,7 +141,11 @@ class VideoProcessor:
             if not os.path.exists(input_path):
                 logger.error(f"Входной файл не найден: {input_path}")
                 return None
-            if self.create_video_circle(input_path, output_path):
+            
+            # Используем персональную длительность или по умолчанию
+            target_duration = duration_override if duration_override is not None else Config.CIRCLE_DURATION
+            
+            if self.create_video_circle(input_path, output_path, target_duration):
                 return output_path
             if os.path.exists(output_path):
                 os.unlink(output_path)
