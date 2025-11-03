@@ -1,2 +1,113 @@
-# telegram-video-circle-bot
-Telegram bot that converts forwarded videos to video circles (video notes)
+# Telegram Video Circle Bot
+
+Бот для преобразования пересланных видео в видео-кружочки (video notes) в Telegram. Он берёт средний фрагмент видео (до 60 секунд), конвертирует в квадратное видео и отправляет как кружок.
+
+## Возможности
+- Принимает видео (вложение video или документ с видео)
+- Ограничение до FullHD (1920x1080) и по размеру файла (настраивается)
+- Берёт середину ролика нужной длительности (по умолчанию 10 сек)
+- Конвертирует в квадрат и отправляет как видео-кружок
+
+## Требования
+- Python 3.10+
+- FFmpeg установлен в системе (должны работать команды `ffmpeg` и `ffprobe`)
+
+Проверить установку FFmpeg:
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+### Установка на Windows
+1. Скачать сборку FFmpeg (например, с https://www.gyan.dev/ffmpeg/builds/)
+2. Распаковать и добавить путь к папке `bin` в переменную окружения PATH
+
+### Установка на macOS
+```bash
+brew install ffmpeg
+```
+
+### Установка на Linux (Debian/Ubuntu)
+```bash
+sudo apt update && sudo apt install -y ffmpeg
+```
+
+## Быстрый старт
+
+1) Клонируйте репозиторий
+```bash
+git clone https://github.com/Kxngfxsher/telegram-video-circle-bot.git
+cd telegram-video-circle-bot
+```
+
+2) Создайте и активируйте виртуальное окружение (рекомендуется)
+- Windows (PowerShell):
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+- macOS/Linux (bash/zsh):
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+3) Установите зависимости
+```bash
+pip install -r requirements.txt
+```
+
+4) Создайте `.env` и заполните
+```bash
+cp .env.example .env
+# Откройте .env и вставьте токен бота от @BotFather
+```
+
+5) Запустите бота
+```bash
+python bot.py
+```
+
+## Конфигурация (.env)
+См. файл [.env.example](.env.example). Основные параметры:
+- `BOT_TOKEN` — токен бота (обязательно)
+- `MAX_FILE_SIZE_MB` — максимальный размер входного видео
+- `MAX_VIDEO_DURATION` — максимальная длительность входного видео
+- `CIRCLE_DURATION` — длительность кружка (макс. 60 сек из ограничений Telegram)
+- `CIRCLE_QUALITY` — качество/размер кружка: low (240), medium (480), high (720)
+- `LOG_LEVEL` — уровень логов (INFO по умолчанию)
+
+## Структура проекта
+```
+telegram-video-circle-bot/
+├─ bot.py               # Точка входа, обработчики Telegram-обновлений
+├─ video_processor.py   # Обработка видео (FFmpeg), вырез середины, квадрат
+├─ config.py            # Конфигурация, чтение .env и валидация
+├─ requirements.txt     # Зависимости Python
+├─ .env.example         # Пример переменных окружения
+├─ .gitignore           # Игнорируемые файлы
+└─ temp/                # Временные файлы (создаётся автоматически)
+```
+
+## Как это работает
+1. Пользователь пересылает боту видео
+2. Бот скачивает видео во временную папку `temp/`
+3. Модуль `video_processor.py` через `ffmpeg`:
+   - вычисляет середину ролика
+   - вырезает фрагмент нужной длительности
+   - масштабирует и кадрирует до квадрата (240/480/720)
+   - сохраняет MP4 (h264 + aac)
+4. Бот отправляет файл как `video_note` (кружок) пользователю
+5. Временные файлы удаляются
+
+## Типичные вопросы
+- "Почему не отправляется как кружок?" — Убедитесь, что файл квадратный, <= 60 сек, кодеки h264/aac.
+- "Большой файл/длинное видео" — Измените лимиты в `.env` или пришлите меньший файл.
+- "FFmpeg не найден" — Добавьте `ffmpeg` и `ffprobe` в PATH.
+
+## Безопасность и лимиты Telegram
+- Telegram ограничивает размер и длительность видео-кружков
+- Отправка больших файлов может занимать время — бот показывает статус загрузки
+
+## Лицензия
+MIT
